@@ -42,9 +42,6 @@
 #include <string>
 #include <stdlib.h>
 #include <unistd.h>
-// #include <mutex>
-// #include <lock_guard>
-
 #include <google/protobuf/util/time_util.h>
 #include <grpc++/grpc++.h>
 #include<glog/logging.h>
@@ -68,7 +65,6 @@ using csce438::Request;
 using csce438::Reply;
 using csce438::SNSService;
 
-
 struct Client {
   std::string username;
   bool connected = true;
@@ -84,127 +80,180 @@ struct Client {
 //Vector that stores every client that has been created
 std::vector<Client*> client_db;
 
+//Helper function used to find a Client object given its username
+int find_user(std::string username){
+  int index = 0;
+  for(Client* c : client_db){
+    if(c->username == username)
+      return index;
+    index++;
+  }
+  return -1;
+}
 
 class SNSServiceImpl final : public SNSService::Service {
   
   Status List(ServerContext* context, const Request* request, ListReply* list_reply) override {
-
-    std::cout << "List called on server from user: " << request->username() << std::endl;
-
-    for(auto& client : client_db) {
-      if(client->username == request->username()) {
-        for(auto& follower : client->client_followers) list_reply->add_followers(follower->username);
-      }
-      list_reply->add_all_users(client->username);
+    log(INFO,"Serving List Request from: " + request->username()  + "\n");
+     
+    Client* user = client_db[find_user(request->username())];
+ 
+    int index = 0;
+    for(Client* c : client_db){
+      list_reply->add_all_users(c->username);
+    }
+    std::vector<Client*>::const_iterator it;
+    for(it = user->client_followers.begin(); it!=user->client_followers.end(); it++){
+      list_reply->add_followers((*it)->username);
     }
     return Status::OK;
   }
 
   Status Follow(ServerContext* context, const Request* request, Reply* reply) override {
-    std::string u1 = request->username(); // requesting user
-    std::string u2 = request->arguments(0); // user to unfollow
 
-    if(u1 == u2) {
-      reply->set_msg("can't follow yourself.");
-      return Status::OK;
-    }
-    
-    Client* c1 = getClient(u1); // c1 should always exist bc client cant send req if it doesnt exist
-    Client* c2 = getClient(u2);
+    std::string username1 = request->username();
+    std::string username2 = request->arguments(0);
+    log(INFO,"Serving Follow Request from: " + username1 + " for: " + username2 + "\n");
 
-    if(!c2) {
-      reply->set_msg("requested user does not exist.");
-    } else {
-      // both users exist, follow operation will be performed
-      // add c1 to c2 followers vector
-      c2->client_followers.push_back(c1);
-      // add c2 to c1 following vector
-      c1->client_following.push_back(c2);
+    int join_index = find_user(username2);
+    if(join_index < 0 || username1 == username2)
+      reply->set_msg("Join Failed -- Invalid Username");
+    else{
+      Client *user1 = client_db[find_user(username1)];
+      Client *user2 = client_db[join_index];      
+      if(std::find(user1->client_following.begin(), user1->client_following.end(), user2) != user1->client_following.end()){
+	reply->set_msg("Join Failed -- Already Following User");
+        return Status::OK;
+      }
+      user1->client_following.push_back(user2);
+      user2->client_followers.push_back(user1);
+      reply->set_msg("Follow Successful");
     }
- 
     return Status::OK; 
   }
 
   Status UnFollow(ServerContext* context, const Request* request, Reply* reply) override {
-
-    std::string u1 = request->username(); // requesting user
-    std::string u2 = request->arguments(0); // user to unfollow
-
-    if(u1 == u2) {
-      reply->set_msg("requested user does not exist.");
-      return Status::OK;
-    }
-
-    Client* c1 = getClient(u1); // c1 should always exist bc client cant send req if it doesnt exist
-    Client* c2 = getClient(u2);
-    if(!c2) {
-      reply->set_msg("requested user does not exist.");
-    } else {
-      // both users exist, unfollow operation will be performed
-      // Check and erase from c2's followers if c1 is found
-      auto it_follower = std::find(c2->client_followers.begin(), c2->client_followers.end(), c1);
-      if (it_follower != c2->client_followers.end()) {
-        c2->client_followers.erase(it_follower);
+    std::string username1 = request->username();
+    std::string username2 = request->arguments(0);
+    log(INFO,"Serving Unfollow Request from: " + username1 + " for: " + username2);
+ 
+    int leave_index = find_user(username2);
+    if(leave_index < 0 || username1 == username2) {
+      reply->set_msg("Unknown follower");
+    } else{
+      Client *user1 = client_db[find_user(username1)];
+      Client *user2 = client_db[leave_index];
+      if(std::find(user1->client_following.begin(), user1->client_following.end(), user2) == user1->client_following.end()){
+	reply->set_msg("You are not a follower");
+        return Status::OK;
       }
-
-      // Check and erase from c1's following if c2 is found
-      auto it_following = std::find(c1->client_following.begin(), c1->client_following.end(), c2);
-      if (it_following != c1->client_following.end()) {
-        c1->client_following.erase(it_following);
-      }
+      
+      user1->client_following.erase(find(user1->client_following.begin(), user1->client_following.end(), user2)); 
+      user2->client_followers.erase(find(user2->client_followers.begin(), user2->client_followers.end(), user1));
+      reply->set_msg("UnFollow Successful");
     }
-
     return Status::OK;
   }
 
   // RPC Login
   Status Login(ServerContext* context, const Request* request, Reply* reply) override {
+    Client* c = new Client();
     std::string username = request->username();
-    bool userExists = false;
-
-    for(auto& client : client_db) {
-      if(client->username == username) {
-        userExists = true;
-        
-        if(client->connected) reply->set_msg("you have already joined");
-        break;
+    log(INFO, "Serving Login Request: " + username + "\n");
+    
+    int user_index = find_user(username);
+    if(user_index < 0){
+      c->username = username;
+      client_db.push_back(c);
+      reply->set_msg("Login Successful!");
+    }
+    else{
+      Client *user = client_db[user_index];
+      if(user->connected) {
+	log(WARNING, "User already logged on");
+        reply->set_msg("you have already joined");
+      }
+      else{
+        std::string msg = "Welcome Back " + user->username;
+	reply->set_msg(msg);
+        user->connected = true;
       }
     }
-
-    if(!userExists) {
-      Client* newClient = new Client;
-      newClient->username = username;
-      client_db.push_back(newClient);
-    }
-    
     return Status::OK;
   }
 
   Status Timeline(ServerContext* context, 
 		ServerReaderWriter<Message, Message>* stream) override {
-
-      Message m;
-      while(stream->Read(&m)) {
-        std::string username = m.username();
-        Client* c = getClient(username); // gets client who wrote the message
-        // to the grader: unfortunately i did not complete the server side Timeline function in time.
-        // The client side Timeline should be complete, but what good is it without the server? D:
-        // I reached the part of being able to read messages from the client stream on the server vvv
-        // std::cout << "Received message: " << m.msg() << " from " << m.username() << std::endl;
+    log(INFO,"Serving Timeline Request");
+    Message message;
+    Client *c;
+    while(stream->Read(&message)) {
+      std::string username = message.username();
+      int user_index = find_user(username);
+      c = client_db[user_index];
+ 
+      //Write the current message to "username.txt"
+      std::string filename = username+".txt";
+      std::ofstream user_file(filename,std::ios::app|std::ios::out|std::ios::in);
+      google::protobuf::Timestamp temptime = message.timestamp();
+      std::string time = google::protobuf::util::TimeUtil::ToString(temptime);
+      std::string fileinput = time+" :: "+message.username()+":"+message.msg()+"\n";
+      //"Set Stream" is the default message from the client to initialize the stream
+      if(message.msg() != "Set Stream")
+        user_file << fileinput;
+      //If message = "Set Stream", print the first 20 chats from the people you follow
+      else{
+        if(c->stream==0)
+      	  c->stream = stream;
+        std::string line;
+        std::vector<std::string> newest_twenty;
+        std::ifstream in(username+"following.txt");
+        int count = 0;
+        //Read the last up-to-20 lines (newest 20 messages) from userfollowing.txt
+        while(getline(in, line)){
+//          count++;
+//          if(c->following_file_size > 20){
+//	    if(count < c->following_file_size-20){
+//	      continue;
+//            }
+//          }
+          newest_twenty.push_back(line);
+        }
+        Message new_msg; 
+ 	//Send the newest messages to the client to be displayed
+ 	if(newest_twenty.size() >= 40){ 	
+	    for(int i = newest_twenty.size()-40; i<newest_twenty.size(); i+=2){
+	       new_msg.set_msg(newest_twenty[i]);
+	       stream->Write(new_msg);
+	    }
+        }else{
+	    for(int i = 0; i<newest_twenty.size(); i+=2){
+	       new_msg.set_msg(newest_twenty[i]);
+	       stream->Write(new_msg);
+	    }
+        }
+        //std::cout << "newest_twenty.size() " << newest_twenty.size() << std::endl; 
+        continue;
       }
-    
-    return Status::OK;
-  }
-
-  // helper functions
-  // get client pointer from vector, returns null if no such client exists
-  Client* getClient(std::string username) {
-    for(int i = 0; i < client_db.size(); i++) {
-      if(client_db[i]->username == username) {
-        return client_db[i];
+      //Send the message to each follower's stream
+      std::vector<Client*>::const_iterator it;
+      for(it = c->client_followers.begin(); it!=c->client_followers.end(); it++){
+        Client *temp_client = *it;
+      	if(temp_client->stream!=0 && temp_client->connected)
+	  temp_client->stream->Write(message);
+        //For each of the current user's followers, put the message in their following.txt file
+        std::string temp_username = temp_client->username;
+        std::string temp_file = temp_username + "following.txt";
+	std::ofstream following_file(temp_file,std::ios::app|std::ios::out|std::ios::in);
+	following_file << fileinput;
+        temp_client->following_file_size++;
+	std::ofstream user_file(temp_username + ".txt",std::ios::app|std::ios::out|std::ios::in);
+        user_file << fileinput;
       }
     }
-    return nullptr;
+    //If the client disconnected from Chat Mode, set connected to false
+    c->connected = false;
+    return Status::OK;
   }
 
 };
@@ -225,6 +274,8 @@ void RunServer(std::string port_no) {
 
 int main(int argc, char** argv) {
 
+  
+  
   std::string port = "3010";
   
   int opt = 0;
