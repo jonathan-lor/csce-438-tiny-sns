@@ -1,7 +1,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <ctime>
-
+#include<glog/logging.h>
 #include <google/protobuf/timestamp.pb.h>
 #include <google/protobuf/duration.pb.h>
 #include <chrono>
@@ -23,6 +23,8 @@
 
 #include "coordinator.grpc.pb.h"
 #include "coordinator.pb.h"
+
+#define log(severity, msg) LOG(severity) << msg; google::FlushLogFiles(google::severity); 
 
 using google::protobuf::Timestamp;
 using google::protobuf::Duration;
@@ -48,7 +50,6 @@ struct zNode{
     std::time_t last_heartbeat;
     bool missed_heartbeat;
     bool isActive();
-
 };
 
 //potentially thread safe 
@@ -62,7 +63,8 @@ std::vector<std::vector<zNode*>> clusters = {cluster1, cluster2, cluster3};
 
 
 //func declarations
-int findServer(std::vector<zNode*> v, int id); 
+// modified to return zNode* instead of int
+zNode* findServer(std::vector<zNode*> v, int id); 
 std::time_t getTimeNow();
 void checkHeartbeat();
 
@@ -77,11 +79,33 @@ bool zNode::isActive(){
     return status;
 }
 
+zNode* findServer(std::vector<zNode*> v, int id) {
+    for (auto s : v) if (s->serverID == id) return s;
+    return nullptr;
+} 
+
 
 class CoordServiceImpl final : public CoordService::Service {
 
     Status Heartbeat(ServerContext* context, const ServerInfo* serverinfo, Confirmation* confirmation) override {
-        // Your code here
+        v_mutex.lock();
+        zNode* z = findServer(clusters[serverinfo->clusterid()-1], serverinfo->serverid());
+        if (z) {
+            z->last_heartbeat = getTimeNow();
+            z->missed_heartbeat = false;
+            log(INFO, "Updated heartbeat for cluster " + std::to_string(serverinfo->clusterid()) + " and server ID " + std::to_string(serverinfo->serverid()));
+        } else {
+            zNode* node = new zNode();
+            node->serverID = serverinfo->serverid();
+            node->hostname = serverinfo->hostname();
+            node->port = serverinfo->port();
+            node->type = "Active";
+            node->last_heartbeat = getTimeNow();
+            node->missed_heartbeat = false;
+            clusters[serverinfo->clusterid()-1].push_back(node);
+            log(INFO, "Added zNode to cluster " + std::to_string(serverinfo->clusterid()) + " and server ID " + std::to_string(serverinfo->serverid()));
+        }
+        v_mutex.unlock();
         return Status::OK;
     }
 
@@ -89,7 +113,16 @@ class CoordServiceImpl final : public CoordService::Service {
     //this function assumes there are always 3 clusters and has math
     //hardcoded to represent this.
     Status GetServer(ServerContext* context, const ID* id, ServerInfo* serverinfo) override {
-        // Your code here
+        int cluster_id = (id->id()-1) % 3;
+        zNode* node = clusters[cluster_id][0];
+        serverinfo->set_clusterid(cluster_id);
+        serverinfo->set_serverid(node->serverID);
+        serverinfo->set_hostname(node->hostname);
+        serverinfo->set_port(node->port);
+        serverinfo->set_type(node->type);
+
+        log(INFO, "Client " << id->id() << " assigned to cluster " << cluster_id << "and server ID " << node->serverID);
+
         return Status::OK;
     }
 
@@ -99,7 +132,6 @@ class CoordServiceImpl final : public CoordService::Service {
 void RunServer(std::string port_no){
     //start thread to check heartbeats
     std::thread hb(checkHeartbeat);
-    //localhost = 127.0.0.1
     std::string server_address("127.0.0.1:"+port_no);
     CoordServiceImpl service;
     //grpc::EnableDefaultHealthCheckService(true);
@@ -132,6 +164,9 @@ int main(int argc, char** argv) {
                 std::cerr << "Invalid Command Line Argument\n";
         }
     }
+    std::string log_file_name = std::string("coordinator-") + port;
+    google::InitGoogleLogging(log_file_name.c_str());
+    log(INFO, "Logging Initialized. Server starting...");
     RunServer(port);
     return 0;
 }
@@ -142,15 +177,13 @@ void checkHeartbeat(){
     while(true){
         //check servers for heartbeat > 10
         //if true turn missed heartbeat = true
-        // Your code below
-
         v_mutex.lock();
 
         // iterating through the clusters vector of vectors of znodes
         for (auto& c : clusters){
             for(auto& s : c){
                 if(difftime(getTimeNow(),s->last_heartbeat)>10){
-                    std::cout << "missed heartbeat from server " << s->serverID << std::endl;
+                    log(INFO, "Missed heartbeat from server " << s->serverID);
                     if(!s->missed_heartbeat){
                         s->missed_heartbeat = true;
                         s->last_heartbeat = getTimeNow();

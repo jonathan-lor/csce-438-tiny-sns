@@ -20,10 +20,11 @@ service CoordService{
 
 //server info message definition
 message ServerInfo{
-    int32 serverID = 1;
-    string hostname = 2;
-    string port = 3;
-    string type = 4;
+    int32 clusterID = 1;
+    int32 serverID = 2;
+    string hostname = 3;
+    string port = 4;
+    string type = 5;
 }
 // TODO: check which extra stuff in the coordinator.proto you dont need
 

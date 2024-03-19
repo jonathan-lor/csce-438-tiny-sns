@@ -42,12 +42,14 @@
 #include <string>
 #include <stdlib.h>
 #include <unistd.h>
+#include <thread>
 #include <google/protobuf/util/time_util.h>
 #include <grpc++/grpc++.h>
 #include<glog/logging.h>
 #define log(severity, msg) LOG(severity) << msg; google::FlushLogFiles(google::severity); 
 
 #include "sns.grpc.pb.h"
+#include "coordinator.grpc.pb.h"
 
 
 using google::protobuf::Timestamp;
@@ -59,11 +61,15 @@ using grpc::ServerReader;
 using grpc::ServerReaderWriter;
 using grpc::ServerWriter;
 using grpc::Status;
+using grpc::ClientContext;
 using csce438::Message;
 using csce438::ListReply;
 using csce438::Request;
 using csce438::Reply;
 using csce438::SNSService;
+using csce438::CoordService;
+using csce438::ServerInfo;
+using csce438::Confirmation;
 
 struct Client {
   std::string username;
@@ -79,6 +85,9 @@ struct Client {
 
 //Vector that stores every client that has been created
 std::vector<Client*> client_db;
+
+// Stub for coordinator
+std::unique_ptr<CoordService::Stub> stub_;
 
 //Helper function used to find a Client object given its username
 int find_user(std::string username){
@@ -258,7 +267,30 @@ class SNSServiceImpl final : public SNSService::Service {
 
 };
 
-void RunServer(std::string port_no) {
+void KeepAlive(int clusterId, int serverId, const std::string& hostName, const std::string& portNumber) {
+    while (true) {
+        grpc::ClientContext context;
+        ServerInfo serverDetails;
+        Confirmation heartbeatConfirmation;
+        
+        serverDetails.set_clusterid(clusterId);
+        serverDetails.set_serverid(serverId);
+        serverDetails.set_hostname(hostName);
+        serverDetails.set_port(portNumber);
+        serverDetails.set_type("Active");
+
+        auto heartbeatStatus = stub_->Heartbeat(&context, serverDetails, &heartbeatConfirmation);
+        if (heartbeatStatus.ok()) {
+            log(INFO, "Successfully sent heartbeat");
+        } else {
+            log(ERROR, "Heartbeat failed");
+        }
+        
+        sleep(3);
+    }
+}
+
+void RunServer(int cluster_id, int server_id, std::string coordinator_ip, std::string coordinator_port, std::string port_no) {
   std::string server_address = "0.0.0.0:"+port_no;
   SNSServiceImpl service;
 
@@ -269,29 +301,52 @@ void RunServer(std::string port_no) {
   std::cout << "Server listening on " << server_address << std::endl;
   log(INFO, "Server listening on "+server_address);
 
+  std::string login_info = coordinator_ip + ":" + coordinator_port;
+  stub_ = std::unique_ptr<CoordService::Stub>(CoordService::NewStub(
+            grpc::CreateChannel(
+              login_info, grpc::InsecureChannelCredentials())));
+
+  std::thread hb(KeepAlive, cluster_id, server_id, "0.0.0.0", port_no);
+
   server->Wait();
 }
 
 int main(int argc, char** argv) {
 
   
-  
-  std::string port = "3010";
+  int cluster_id = 1;
+  int server_id = 1;
+  std::string coordinator_ip = "127.0.0.1";
+  std::string coordinator_port = "3010";
+  std::string port = "3011";
   
   int opt = 0;
-  while ((opt = getopt(argc, argv, "p:")) != -1){
+  while ((opt = getopt(argc, argv, "c:s:h:k:p:")) != -1){
     switch(opt) {
+      case 'c':
+        cluster_id = atoi(optarg);
+        break;
+      case 's':
+        server_id = atoi(optarg);
+        break;
+      case 'h':
+        coordinator_ip = optarg;
+        break;
+      case 'k':
+        coordinator_port = optarg;
+        break;
       case 'p':
-          port = optarg;break;
+        port = optarg;
+        break;
       default:
-	  std::cerr << "Invalid Command Line Argument\n";
+	      std::cerr << "Invalid Command Line Argument\n";
     }
   }
   
   std::string log_file_name = std::string("server-") + port;
   google::InitGoogleLogging(log_file_name.c_str());
   log(INFO, "Logging Initialized. Server starting...");
-  RunServer(port);
+  RunServer(cluster_id, server_id, coordinator_ip, coordinator_port, port);
 
   return 0;
 }

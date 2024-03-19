@@ -6,9 +6,12 @@
 #include <unistd.h>
 #include <csignal>
 #include <grpc++/grpc++.h>
+#include <glog/logging.h>
+#define log(severity, msg) LOG(severity) << msg; google::FlushLogFiles(google::severity);
 #include "client.h"
 
-#include "sns.grpc.pb.h"
+#include "sns.grpc.pb.h" 
+#include "coordinator.grpc.pb.h"
 using grpc::Channel;
 using grpc::ClientContext;
 using grpc::ClientReader;
@@ -19,7 +22,12 @@ using csce438::Message;
 using csce438::ListReply;
 using csce438::Request;
 using csce438::Reply;
+using csce438::PingMsg;
 using csce438::SNSService;
+using csce438::CoordService;
+using csce438::ServerInfo;
+using csce438::Confirmation;
+using csce438::ID;
 
 void sig_ignore(int sig) {
   std::cout << "Signal caught " + sig;
@@ -43,7 +51,7 @@ public:
   Client(const std::string& hname,
 	 const std::string& uname,
 	 const std::string& p)
-    :hostname(hname), username(uname), port(p) {}
+    :coordinator_ip(hname), username(uname), coordinator_port(p) {}
 
   
 protected:
@@ -52,12 +60,13 @@ protected:
   virtual void processTimeline();
 
 private:
+  std::string coordinator_ip;
+  std::string coordinator_port;
   std::string hostname;
   std::string username;
   std::string port;
   
-  // You can have an instance of the client stub
-  // as a member variable.
+  std::unique_ptr<CoordService::Stub> coordinator_stub_;
   std::unique_ptr<SNSService::Stub> stub_;
   
   IReply Login();
@@ -82,14 +91,26 @@ int Client::connectTo()
   // a member variable in your own Client class.
   // Please refer to gRpc tutorial how to create a stub.
   // ------------------------------------------------------------
-  std::string login_info = hostname + ":" + port;
-    stub_ = std::unique_ptr<SNSService::Stub>(SNSService::NewStub(
-			       grpc::CreateChannel(
-			      login_info, grpc::InsecureChannelCredentials())));
+    std::string coordinator_info = coordinator_ip + ":" + coordinator_port;
+    coordinator_stub_ = std::unique_ptr<CoordService::Stub>(CoordService::NewStub(
+            grpc::CreateChannel(
+              coordinator_info, grpc::InsecureChannelCredentials())));
+    grpc::ClientContext context;
+    ID clientId;
+    ServerInfo targetServerInfo;
     
-    IReply ire = Login();
-    if(!ire.grpc_status.ok() || (ire.comm_status == FAILURE_ALREADY_EXISTS)) {
-      return -1;
+    clientId.set_id(std::stoi(username));
+    auto connectionStatus = coordinator_stub_->GetServer(&context, clientId, &targetServerInfo);
+    hostname = targetServerInfo.hostname();
+    port = targetServerInfo.port();
+    auto serverAddress = hostname + ":" + port;
+    log(INFO, "Connecting to server at " + serverAddress);
+    stub_ = std::make_unique<SNSService::Stub>(
+        grpc::CreateChannel(serverAddress, grpc::InsecureChannelCredentials())
+    );
+    auto loginResult = Login();
+    if (!loginResult.grpc_status.ok() || loginResult.comm_status == FAILURE_ALREADY_EXISTS) {
+        return -1;
     }
     return 1;
 }
@@ -343,28 +364,27 @@ void Client::Timeline(const std::string& username) {
 /////////////////////////////////////////////
 
 int main(int argc, char** argv) {
-
-  std::string hostname = "localhost";
+  std::string coordinator_ip = "localhost";
   std::string username = "default";
-  std::string port = "3010";
-    
+  std::string coordinator_port = "3010";
   int opt = 0;
-  while ((opt = getopt(argc, argv, "h:u:p:")) != -1){
+  while ((opt = getopt(argc, argv, "h:k:u:")) != -1){
     switch(opt) {
     case 'h':
-      hostname = optarg;break;
+      coordinator_ip = optarg;break;
+    case 'k':
+      coordinator_port = optarg;break;
     case 'u':
       username = optarg;break;
-    case 'p':
-      port = optarg;break;
     default:
       std::cout << "Invalid Command Line Argument\n";
     }
   }
-      
+
+  std::string log_file_name = std::string("client-") + username;
+  google::InitGoogleLogging(log_file_name.c_str());    
   std::cout << "Logging Initialized. Client starting...";
-  
-  Client myc(hostname, username, port);
+  Client myc(coordinator_ip, username, coordinator_port);
   
   //for(int i = 1; i <= 31; i++) 
   //  signal(i, sig_ignore);
